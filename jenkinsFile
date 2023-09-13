@@ -1,0 +1,92 @@
+#!groovy
+
+pipeline {
+  agent {
+    label 'forthgrp-onbuild'
+  }
+  options { timestamps () }
+  stages {
+    stage('Clone') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Init') {
+        steps {
+          script {
+sh '''
+echo GIT_BRANCH: ${GIT_BRANCH} >> ${WORKSPACE}/.buildinfo
+echo GIT_COMMIT: ${GIT_COMMIT} >> ${WORKSPACE}/.buildinfo
+echo GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME} >> ${WORKSPACE}/.buildinfo
+
+echo BUILD_URL: ${BUILD_URL} >> ${WORKSPACE}/.buildinfo
+echo NODE_NAME: ${NODE_NAME} >> ${WORKSPACE}/.buildinfo
+echo BUILD_TIME: ${IMAGE_BUILD_TIMESTAMP} >> ${WORKSPACE}/.buildinfo
+echo IMAGE_VERSION: ${IMAGE_VERSION} >> ${WORKSPACE}/.buildinfo
+echo HQ_IMAGE_URL : "${HQ_IMAGE_URL}" >> ${WORKSPACE}/.buildinfo
+'''
+          }
+        }
+    }
+
+    stage('InitAWS') {
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding',
+                accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                credentialsId: 'ForthGroup-Deployer-AMI',
+                secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+            sh "aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${AWS_ECR_REPO}"
+                }
+      }
+    }
+
+    stage('ServerApps') {
+      parallel{
+        stage('HqAPI'){
+          stages{
+            stage('Build'){
+              steps{
+                script{
+                  docker.build("${HQ_IMAGE_NAME}:${IMAGE_VERSION}", "--rm --no-cache -f ${WORKSPACE}/Dockerfile ${WORKSPACE}")
+                }
+              }
+            }
+            stage('Publish'){
+              steps{
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding',
+                accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                credentialsId: 'ForthGroup-Deployer-AMI',
+                secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                  sh "docker tag ${HQ_IMAGE_NAME}:${IMAGE_VERSION} ${HQ_IMAGE_URL}:${IMAGE_VERSION}"
+                  sh "docker push ${HQ_IMAGE_URL}:${IMAGE_VERSION}"
+                }
+              }
+            }
+            stage('Cleanup') {
+              steps {
+                sh """
+                docker rmi ${HQ_IMAGE_NAME}:${IMAGE_VERSION}
+                docker rmi ${HQ_IMAGE_URL}:${IMAGE_VERSION}
+                """
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  environment {
+    AWS_ACCOUNT_ID = '777000031366'
+    AWS_DEFAULT_REGION = 'us-east-1'
+    IMAGE_VERSION = "${env.GIT_COMMIT.take(7)}"
+    AWS_ECR_REPO = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+    IMAGE_BUILD_TIMESTAMP = (new Date()).format('EEE, MMMM dd,yy hh:mm:ss a')
+
+    HQ_IMAGE_NAME = "serverapps/hq"
+    HQ_IMAGE_URL = "${AWS_ECR_REPO}/${HQ_IMAGE_NAME}"
+
+  }
+
+}
+
